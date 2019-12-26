@@ -1,0 +1,65 @@
+#!/bin/sh
+
+# backup the previous hosts file
+mkdir -p $HOME/backups/hosts
+cp /etc/hosts.deny "$HOME/backups/hosts/hosts.deny$(date -u +"%Y-%m-%d %H.%M.%S")"
+cp /etc/hosts "$HOME/backups/hosts/hosts$(date -u +"%Y-%m-%d %H.%M.%S")"
+
+# generate the new one from the list of blocked instances in the DB
+cat <<HERE > /etc/hosts.deny
+# /etc/hosts.deny: list of hosts that are _not_ allowed to access the system.
+#                  See the manual pages hosts_access(5) and hosts_options(5).
+#
+# Example:    ALL: some.host.name, .some.domain
+#             ALL EXCEPT in.fingerd: other.host.name, .other.domain
+#
+# If you're going to protect the portmapper use the name "rpcbind" for the
+# daemon name. See rpcbind(8) and rpc.mountd(8) for further information.
+#
+# The PARANOID wildcard matches any host whose name does not match its
+# address.
+#
+# You may wish to enable this to ensure any programs that don't
+# validate looked up hostnames still leave understandable logs. In past
+# versions of Debian this has been the default.
+# ALL: PARANOID
+
+ALL: \\
+$(sudo -u mastodon sh -c "psql -c 'COPY (select domain from domain_blocks where severity=1) TO STDOUT WITH CSV' -p 5432 -U mastodon mastodon_production -w" | sed "s/^/  ./g" | sed "s/$/, \\\/g")
+  .malfunctioning.technology
+HERE
+
+# Delete old blocks from /etc/hosts
+while true; do
+  # Sanity check
+  begin=`grep -m 1 -n "Begin DOMAINBLOCKS" /etc/hosts | cut -d : -f 1`
+  end=`grep -m 1 -n "End DOMAINBLOCKS" /etc/hosts | cut -d : -f 1`
+  if [ -z "$begin" -a -z "$end" ]; then
+    echo "Nothing to clean up"
+    break
+  elif [ -z "$begin" -o -z "$end" ]; then
+    echo "Mismatched begin/end! Doing nothing."
+    break
+  elif [ $begin -lt $end ]; then
+    sed -ie "${begin},${end}d" /etc/hosts
+
+    if [ ! $? ]; then
+      echo "Script must be run with permissions to edit /etc/hosts"
+      break
+    else
+      echo "Deleted one block"
+    fi
+  else
+    echo "Mismatched begin/end! Doing nothing."
+    break
+  fi
+done
+
+cat << EOF >> /etc/hosts
+
+# Begin DOMAINBLOCKS
+$(sudo -u mastodon sh -c "psql -c 'COPY (select domain from domain_blocks where severity=1) TO STDOUT WITH CSV' -p 5432 -U mastodon mastodon_production -w" | sed "s/^/127.0.0.1 /g")
+# End DOMAINBLOCKS
+
+EOF
+
